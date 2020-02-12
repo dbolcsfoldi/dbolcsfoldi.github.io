@@ -1,0 +1,387 @@
+<!doctype html>
+
+<html lang="en-us">
+
+<head>
+  <title>Rants, opinions and tall tales.</title>
+  <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="The HTML5 Herald" />
+<meta name="author" content="David Bolcsfoldi" /><meta property="og:title" content="eBPF and the sockmap API" />
+<meta property="og:description" content="Discovering eBPF and the allure of doing stuff &#39;in the kernel&#39;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://blog.bolcsfoldi.com/posts/ebpf-sockmap/" />
+<meta property="article:published_time" content="2020-02-10T21:19:50-08:00" />
+<meta property="article:modified_time" content="2020-02-10T21:19:50-08:00" />
+
+<meta name="twitter:card" content="summary"/>
+<meta name="twitter:title" content="eBPF and the sockmap API"/>
+<meta name="twitter:description" content="Discovering eBPF and the allure of doing stuff &#39;in the kernel&#39;"/>
+
+<meta name="generator" content="Hugo 0.61.0" />
+    
+
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.0/normalize.min.css" />
+  <link rel="stylesheet" href="https://blog.bolcsfoldi.com/fontawesome/css/all.min.css" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto+Slab|Ruda" />
+  <link rel="stylesheet" type="text/css" href="https://blog.bolcsfoldi.com/css/styles.css" /></head>
+
+<body>
+  <div id="container">
+    <header>
+      <h1>
+                <a href="https://blog.bolcsfoldi.com/">Rants, opinions and tall tales.</a>
+            </h1>
+
+      <ul id="social-media">
+             <li>
+               <a href="https://github.com/dbolcsfoldi" title="GitHub">
+               <i class="fab fa-github fa-lg"></i>
+               </a>
+             </li>
+             <li>
+               <a href="https://linkedin.com/in/david-bolcsfoldi-6807893" title="LinkedIn">
+               <i class="fab fa-linkedin fa-lg"></i>
+               </a>
+             </li>
+      </ul>
+      
+      <p><em>Sharing my thoughts with data stores, algorithms and machine learning models</em></p>
+      
+    </header>
+
+    
+<nav>
+    <ul>
+        
+        <li>
+            <a class="" href="https://blog.bolcsfoldi.com/posts/">
+                <i class="fa-li fa  fa-lg"></i><span>Posts</span>
+            </a>
+        </li>
+        
+    </ul>
+</nav>
+
+    <main>
+
+
+
+
+<article>
+
+    <h1>eBPF and the sockmap API</h1>
+
+    
+        <aside>
+    <ul>
+        <li>
+            <time class="post-date" datetime="2020-02-10T21:19:50-08:00">Feb 10, 2020</time>
+        </li>
+        
+        <li>
+            Categories:
+            <em>
+                
+                    
+                    <a href="https://blog.bolcsfoldi.com/categories/tech">Tech</a>
+                
+            </em>
+        </li>
+        
+
+        
+        <li>
+            <em>
+                
+                    
+                    <a href="https://blog.bolcsfoldi.com/tags/ebpf">#ebpf</a>
+                
+                    , 
+                    <a href="https://blog.bolcsfoldi.com/tags/linux">#linux</a>
+                
+                    , 
+                    <a href="https://blog.bolcsfoldi.com/tags/systems-programming">#systems programming</a>
+                
+                    , 
+                    <a href="https://blog.bolcsfoldi.com/tags/ip">#ip</a>
+                
+                    , 
+                    <a href="https://blog.bolcsfoldi.com/tags/example">#example</a>
+                
+            </em>
+        </li>
+        
+
+        <li>10 minutes read</li>
+    </ul>
+</aside>
+
+    
+
+    <p>Recently I read an older post by the Cloudflare engineering team on using sockmap for TCP splicing (<a href="https://blog.cloudflare.com/sockmap-tcp-splicing-of-the-future/">here</a>). Intrigued by the potential of some serious entertainment and curious about the complex tooling I decide to wet my beak in this new area.</p>
+<p>I am firm believer of learning by doing and in this case doubly so with the lack of documentation around this particular eBPF interface. But what should be the &lsquo;doing&rsquo; vehicle for the learning? Well what about something useless like connecting two TCP clients to each other via an intermediary? Sort of like a really simple proxy/relay/TURN server? Perfect!</p>
+<p>All of the code in this post is available as a complete program on github <a href="https://github.com/dbolcsfoldi/ebpf-spice-cookie">here</a>.</p>
+<h1 id="first-attempt">First attempt</h1>
+<p>Compiling and loading a BPF program is multiple step process that roughly goes:</p>
+<ol>
+<li>Write an eBPF program in C.</li>
+<li>Compile said program using clang into an eBPF machine code ELF object file.</li>
+<li>For any shared resources in the program, such as maps, first create the map using the appropriate system call and then do the &lsquo;relocation&rsquo; of the resource in the object file.</li>
+<li>Ask the kernel to load your object file and attach it to some eBPF interface.</li>
+</ol>
+<p>For example an eBPF program like:</p>
+<pre><code>#include &lt;linux/bpf.h&gt;
+#include &lt;linux/types.h&gt;
+
+#include &lt;bpf/bpf_helpers.h&gt;
+
+#define SEC(NAME) __attribute__((section(NAME), used))
+
+struct bpf_map_def SEC(&quot;maps&quot;) sock_map =
+  {
+   .type = BPF_MAP_TYPE_SOCKMAP,
+   .key_size = sizeof(int),
+   .value_size = sizeof(int),
+   .max_entries = 2,
+  };
+
+struct bpf_map_def SEC(&quot;maps&quot;) ip_map =
+  {
+   .type = BPF_MAP_TYPE_HASH,
+   .key_size = sizeof(__u64),
+   .value_size = sizeof(int),
+   .max_entries = 64,
+  };
+
+SEC(&quot;sk_skb/stream_parser&quot;)
+int turn_parser(struct __sk_buff *skb)
+{
+	return skb-&gt;len;
+}
+
+SEC(&quot;sk_skb/stream_verdict&quot;)
+int turn_verdict(struct __sk_buff *skb) {
+  __u64 ip = skb-&gt;remote_ip4;
+  __u32 port = skb-&gt;remote_port;
+  __u64 key = (ip &lt;&lt; 32) | port;
+
+  int *idx = bpf_map_lookup_elem(&amp;ip_map, &amp;key);
+  if (!idx) {
+    return SK_DROP;
+  }
+
+  return bpf_sk_redirect_map(skb, &amp;sock_map, *idx, 0);
+}
+</code></pre><p>has two maps in that both need to be created by the &lsquo;user space&rsquo; loader application and then the maps file descriptors &lsquo;mapped&rsquo; into the appropriate locations in the eBPF object file using a magical eBPF instruction. The kernel with then resolve the file descriptor to an actual memory address when the eBPF program is loaded.</p>
+<p>If this seems a bit complicated at first glance it's because it is a bit complicated! So being a fairly lazy person I decided to see what tool is out there that can do the above for me without resorting to writing my own loader and I quickly discovered <a href="https://github.com/iovisor/bcc">BCC - the BPF Compiler Collection</a>.</p>
+<p>BCC is a really neat project that allows you to compile your BPF programs and patch them with the relocations all from your favourite programming language - as long as that programming language is either C or Python. So pretty much everyone is covered I no?</p>
+<p>It's also some pretty cool technology. Essentially, from what I can tell, it's a clang frontend that consumes your C code and automatically does the relocations for you as part of the compilation process. Given the allure of automatically generating BPF programs including all the relocation BCC seemed like ideal - until I started using it and discovered that sockmap and it's associated calls are NOT supported by the clang frontend.</p>
+<p>No matter. Not afraid to roll up my sleaves, grease my elbows and patch this beautiful beast of a tool to mine own purposes I dove head first into the rabbit hole. And boy is it a magnificent rabbit hole but it's also a really deep, mostly undocumented C++ and clang API rabbit hole. And I was here to learn about eBPF really so I decided to look around for an alternate solution. (Also I wanted to finish this blog post).</p>
+<p>First attempt yielded some partial patches (promise, will try to wrap these up) to the BCC toolchain to support sockmap, some additional APIs and a deep respect for the current BCC team.</p>
+<h1 id="second-attempt">Second attempt</h1>
+<p>The second attempt was more straight forward. As part of digging into BCC I discovered a library called <a href="https://github.com/libbpf/libbpf">libbpf</a>, which is a standalone build of the linux kernel trees bpf library. A quick review of the header files seemed to show that this tool could certainly help with most of nitty-gritty ELF parsing, eBPF specifics and even provide convenient wrappers around BPF system call.</p>
+<p>Seemed almost too good to be true. Given the above eBPF program how do I actually compile and load it? For the compiling piece I'd have to resort a crude command line:</p>
+<p><code>clang -Wall -Wextra -O2 -emit-llvm -c ebpf-kern.c -S -o - | llc -march=bpf -filetype=obj -o ebpf-kern.o</code></p>
+<p>Long gone is the magic of the BCC and I would of course have to do my own&hellip; dun-dun-duh RELOCATIONS! But before we jump into that I'd like to present the master piece below - them main entry point. As is fashionalble these days there are no comments. The whole file, <a href="https://github.com/dbolcsfoldi/ebpf-spice-cookie/blob/master/main.cc">main.cc</a> is on github.</p>
+<pre><code>#include &lt;poll.h&gt;
+#include &lt;stdint.h&gt;
+
+#include &lt;bpf/libbpf.h&gt;
+</code></pre><p>I built libbpf from source (on Ubuntu Eoan) for this - I figured it'd be easier to have a version that I could &lsquo;mess with&rsquo; if needed.</p>
+<pre><code>#include &quot;server.h&quot;
+#include &quot;client.h&quot;
+#include &quot;bpf-loader.h&quot;
+
+static int add_ip(struct bpf_map *ip_map, struct bpf_map *sock_map, const client &amp;from, int idx, const client &amp;to) {
+  uint64_t key = (static_cast&lt;uint64_t&gt;(htonl(from.ip())) &lt;&lt; 32) | htonl(from.port());
+
+  if (bpf_map_update_elem(bpf_map__fd(ip_map), &amp;key, &amp;idx, BPF_ANY) != 0) {
+    fprintf(stderr, &quot;%d: %s\n&quot;, errno, strerror(errno));
+    return -1;
+  }
+
+  int fd = to.fd();
+  if (bpf_map_update_elem(bpf_map__fd(sock_map), &amp;idx, &amp;fd, BPF_ANY) != 0) {
+    fprintf(stderr, &quot;%d: %s\n&quot;, errno, strerror(errno));
+    return -1;
+  }
+
+  return 0;
+}
+</code></pre><p>As you may have noted in the eBPF program there are two maps used. The first one is the sockmap that contains all the client sockets, the second one is a hashmap that hashes the clients remote ip and remote port to the sockmap index it's stored at.</p>
+<p>This allows the sockmap verdict program to route each <strong>sk_buff</strong> to the correct socket my locating at the sk_buff remote ip and remote port. Of course this only supports IPv4. You might notice that the key is all using network byte order, this is because the sk_buff uses network byte order. It also stores the port as 32-bit value, hence the htonl.</p>
+<pre><code>int main(int argc, char *argv[]) {
+  bpf_loader b;
+</code></pre><p>Most of the loading magic is contained within the bpf_loader class. It exposes a fairly clean interface but is actually a horrible hack underneath.</p>
+<pre><code>  auto r3 = b.load(argv[1]);
+
+  if (r3.is_err()) {
+    fprintf(stderr, &quot;%d: %s\n&quot;, r3.error().err(), r3.error().msg().c_str());
+    return -1;
+  }
+
+  auto r4 = b.map(&quot;sock_map&quot;);
+  if (r4.is_err()) {
+    fprintf(stderr, &quot;%d: %s\n&quot;, r4.error().err(), r4.error().msg().c_str());
+    return -1;
+  }
+
+  struct bpf_map *sock_map = r4.value();
+
+  r4 = b.map(&quot;ip_map&quot;);
+  if (r4.is_err()) {
+    fprintf(stderr, &quot;%d: %s\n&quot;, r4.error().err(), r4.error().msg().c_str());
+    return -1;
+  }
+
+  struct bpf_map *ip_map = r4.value();
+</code></pre><p>At this point we've loaded our eBPF object file and retrieved the two maps (&ldquo;sock_map&rdquo; and &ldquo;ip_map&rdquo;), so we know the eBPF program is good.</p>
+<pre><code>  server s(&quot;localhost&quot;, 8080);
+  auto r = s.init();
+
+  if (r.is_err()) {
+    fprintf(stderr, &quot;%d: %s\n&quot;, r.error().err(), r.error().msg().c_str());
+    return -1;
+  }
+
+  auto r2 = s.accept();
+  if (r2.is_err()) {
+    fprintf(stderr, &quot;%d: %s\n&quot;, r2.error().err(), r2.error().msg().c_str());
+    return -1;
+  }
+
+  client c1(r2.value().first, r2.value().second);
+  fprintf(stdout, &quot;%s connected on %d (%d)\n&quot;, c1.hostname().c_str(), c1.port(), c1.fd());
+
+  r2 = s.accept();
+  if (r2.is_err()) {
+    fprintf(stderr, &quot;%d: %s\n&quot;, r2.error().err(), r2.error().msg().c_str());
+    return -1;
+  }
+
+  client c2(r2.value().first, r2.value().second);
+  fprintf(stdout, &quot;%s connected on %d (%d)\n&quot;, c2.hostname().c_str(), c2.port(), c2.fd());
+
+</code></pre><p>We've created a listening socket, accepted two client connections, let's connect them~</p>
+<pre><code>
+  add_ip(ip_map, sock_map, c1, 0, c2);
+  add_ip(ip_map, sock_map, c2, 1, c1);
+
+</code></pre><p>We call the add_ip function to set up the kernel side by adding the client sockets to the ip_map and sock_map. The program has already been loaded at this point though, we've just been dropping all the incomming data.</p>
+<pre><code>  struct pollfd fds[2] =
+    {
+     { .fd = c1.fd(), .events = POLLRDHUP },
+     { .fd = c2.fd(), .events = POLLRDHUP },
+    };
+
+  poll(fds, sizeof(fds) / sizeof(fds[0]), -1);
+
+  fprintf(stdout, &quot;we are done!\n&quot;);
+  // wait for the magic!
+  return 0;
+}
+</code></pre><p>Then we just wait for one of the clients close their connection which exits the program, cleaning up the BPF program and the BPF maps.</p>
+<h2 id="the-ebpf-loader">The eBPF loader</h2>
+<p>All the nitty gritty of loading and massaging the eBPF object file is contained within the <a href="https://github.com/dbolcsfoldi/ebpf-spice-cookie/blob/master/bpf-loader.cc">bpf_loader</a>. The code is pretty straight forward except for the part that updates the maps in the eBPF file with the corresponding file descriptors.</p>
+<p>libbpf provides an API where you can register a callback to modify the eBPF program before it's loaded into the kernel. To use it, we simply register our implementation, which program it should run for (the verdit function) and how many instances of the program we should replacements for (just the one in this case).</p>
+<pre><code>bpf_program__set_prep(programs_[&quot;sk_skb/stream_verdict&quot;], 1, sock_map_inserter);
+</code></pre><p>Simple eh? The actual callback implementation is a bit more complicated since we need to &lsquo;patch up&rsquo; the correct eBPF instructions with the file descriptors for the maps.</p>
+<pre><code>static int sock_map_inserter(struct bpf_program *prog, int n,
+                        struct bpf_insn *insns, int insns_cnt,
+                        struct bpf_prog_prep_result *res) {
+  struct bpf_insn *ni = static_cast&lt;struct bpf_insn *&gt;(calloc(sizeof(insns), insns_cnt));
+  memcpy(ni, insns, sizeof(insns) * insns_cnt);
+
+  for (int i = 0; i &lt; insns_cnt; ++i) {
+    if (ni[i].code == (BPF_LD | BPF_IMM | BPF_DW)) {
+</code></pre><p>What we are looking for here is a load instruction, specifically a load 64-bit load with IMM mode. Of course this is fragile, we make assumption here that we would only do this load in case of a map/resource call. But we don't know what this load is for at this point or how to handle it. The specifics on the magical load instructions are described in a comment in <a href="https://github.com/libbpf/libbpf/blob/e5dbc1a96f138e7c47324a65269adff0ca0f4f6e/include/uapi/linux/bpf.h#L311">linux/bpf.h</a>.</p>
+<pre><code>/* When BPF ldimm64's insn[0].src_reg != 0 then this can have
+ * two extensions:
+ *
+ * insn[0].src_reg:  BPF_PSEUDO_MAP_FD   BPF_PSEUDO_MAP_VALUE
+ * insn[0].imm:      map fd              map fd
+ * insn[1].imm:      0                   offset into value
+ * insn[0].off:      0                   0
+ * insn[1].off:      0                   0
+ * ldimm64 rewrite:  address of map      address of map[0]+offset
+ * verifier type:    CONST_PTR_TO_MAP    PTR_TO_MAP_VALUE
+ */
+</code></pre><p>If we were using BCC, the frontend would take care of this for us but&hellip; see attempt no. 1.</p>
+<p>Instead we get to loop through all the following instructions to find the call site and then figure out what call this load is for.</p>
+<pre><code>static struct bpf_insn * find_call(struct bpf_insn *ni, int count) {
+  for (int i = 0; i &lt; count; ++i) {
+    if ((ni[i].code &amp; 0xf0) == 0x80) {
+      return &amp;ni[i];
+    }
+  }
+
+  return nullptr;
+}
+</code></pre><p>Very simply, a call is a special eBPF jump encoding with a code for the function in the imm field. We simply loop through the remaining instructions to see if we can find one. And if not we'll crash :-)</p>
+<pre><code>    
+      struct bpf_insn *call_ni = find_call(&amp;ni[i], insns_cnt - i);
+      int fd = 0;
+
+      if (call_ni-&gt;imm == BPF_FUNC_map_lookup_elem) {
+        fd = fd_maps[&quot;ip_map&quot;];
+      } else if (call_ni-&gt;imm == BPF_FUNC_sk_redirect_map) {
+        fd = fd_maps[&quot;sock_map&quot;];
+      } else {
+        continue;
+      }
+</code></pre><p>Here we simply look for the two types of function calls we have maps for, either look something up in the hash map or redirect via the sockmap. The function call codes themselves are built using a macro in the <a href="https://github.com/libbpf/libbpf/blob/e5dbc1a96f138e7c47324a65269adff0ca0f4f6e/include/uapi/linux/bpf.h#L3020">linux/bpf.h</a> header file.</p>
+<p>For everything else, we simply skip it.</p>
+<pre><code>      ni[i].src_reg = BPF_PSEUDO_MAP_FD;
+      ni[i].imm = fd;
+    }
+  }
+  
+</code></pre><p>Finally we do the actual patching, that is setting the src_reg to be BPF_PSEUDO_MAP_FD and the imm value to the correct map file descriptor, just as described in the comment.</p>
+<pre><code>
+  res-&gt;new_insn_ptr = ni;
+  res-&gt;new_insn_cnt = insns_cnt;
+  res-&gt;pfd = nullptr;
+  return 0;
+}
+
+</code></pre><p>And finally we return the patched eBPF program to libbpf to be loaded by the kernel.</p>
+<h2 id="running-it">Running it</h2>
+<p>First clone the repo as <code>git clone https://github.com/dbolcsfoldi/ebpf-spice-cookie.git</code> and build with <code>./build.sh</code>.</p>
+<p>To run it it's pretty straight forward, as root (or with CAP_NET_ADMIN set) do <code>./ebpf-user ebpf-kern.o</code> and then connect to server using everyones favourite cat, the net cat.</p>
+<p><code>nc -4 127.0.0.1 8080</code> and again <code>nc -4 127.0.0.1 8080</code> and type away! Data traffic forwarded in the kernel using the magic of eBPF.</p>
+<p>Done!</p>
+
+
+</article>
+
+
+<section class="post-nav">
+    <ul>
+        
+        <li>
+            <a href="https://blog.bolcsfoldi.com/posts/on-dna-sharing/"><i class="fa fa-chevron-circle-left"></i> On DNA sharing &amp; 23andme</a>
+        </li>
+        
+        
+    </ul>
+</section>
+    
+
+
+
+
+
+</main>
+    <footer>
+        <h6>Copyright © 2019 - David Bolcsfoldi |
+            Rendered by <a href="https://gohugo.io" title="Hugo">Hugo</a> |
+            <a href="https://blog.bolcsfoldi.comindex.xml">Subscribe </a></h6>
+    </footer>
+</div>
+<script src="https://blog.bolcsfoldi.com/js/scripts.js"></script>
+
+</body>
+
+</html>
+
