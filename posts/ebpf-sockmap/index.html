@@ -284,7 +284,7 @@ static int add_ip(struct bpf_map *ip_map, struct bpf_map *sock_map, const client
 </code></pre><p>Then we just wait for one of the clients close their connection which exits the program, cleaning up the BPF program and the BPF maps.</p>
 <h2 id="the-ebpf-loader">The eBPF loader</h2>
 <p>All the nitty gritty of loading and massaging the eBPF object file is contained within the <a href="https://github.com/dbolcsfoldi/ebpf-spice-cookie/blob/master/bpf-loader.cc">bpf_loader</a>. The code is pretty straight forward except for the part that updates the maps in the eBPF file with the corresponding file descriptors.</p>
-<p>libbpf provides an API where you can register a callback to modify the eBPF program before it's loaded into the kernel. To use it, we simply register our implementation, which program it should run for (the verdit function) and how many instances of the program we should replacements for (just the one in this case).</p>
+<p>libbpf provides an API where you can register a callback to modify the eBPF program before it's loaded into the kernel. To use it, we simply register our implementation, which program it should run for (the verify function) and how many instances of the program we should replacements for (just the one in this case).</p>
 <pre><code>bpf_program__set_prep(programs_[&quot;sk_skb/stream_verdict&quot;], 1, sock_map_inserter);
 </code></pre><p>Simple eh? The actual callback implementation is a bit more complicated since we need to &lsquo;patch up&rsquo; the correct eBPF instructions with the file descriptors for the maps.</p>
 <pre><code>static int sock_map_inserter(struct bpf_program *prog, int n,
