@@ -1,299 +1,106 @@
-
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
- <channel>
-   <title>Tags on Rants, opinions and tall tales.</title>
-   <link>https://blog.bolcsfoldi.com/tags/</link>
-   <description>Recent content in Tags on Rants, opinions and tall tales.</description>
-   <generator>Hugo -- gohugo.io</generator>
-   <language>en-us</language>
-   <copyright>Copyright &amp;copy; 2019 - David Bolcsfoldi</copyright>
-   <lastBuildDate>Mon, 10 Feb 2020 21:19:50 -0800</lastBuildDate>
-   
-       <atom:link href="https://blog.bolcsfoldi.com/tags/index.xml" rel="self" type="application/rss+xml" />
-   
-   
-     <item>
-       <title>eBPF and the sockmap API</title>
-       <link>https://blog.bolcsfoldi.com/posts/ebpf-sockmap/</link>
-       <pubDate>Mon, 10 Feb 2020 21:19:50 -0800</pubDate>
-       
-       <guid>https://blog.bolcsfoldi.com/posts/ebpf-sockmap/</guid>
-       <description>&lt;p&gt;Recently I read an older post by the Cloudflare engineering team on using sockmap for TCP splicing (&lt;a href=&#34;https://blog.cloudflare.com/sockmap-tcp-splicing-of-the-future/&#34;&gt;here&lt;/a&gt;). Intrigued by the potential of some serious entertainment and curious about the complex tooling I decide to wet my beak in this new area.&lt;/p&gt;
-&lt;p&gt;I am firm believer of learning by doing and in this case doubly so with the lack of documentation around this particular eBPF interface. But what should be the &amp;lsquo;doing&amp;rsquo; vehicle for the learning? Well what about something useless like connecting two TCP clients to each other via an intermediary? Sort of like a really simple proxy/relay/TURN server? Perfect!&lt;/p&gt;
-&lt;p&gt;All of the code in this post is available as a complete program on github &lt;a href=&#34;https://github.com/dbolcsfoldi/ebpf-spice-cookie&#34;&gt;here&lt;/a&gt;.&lt;/p&gt;
-&lt;h1 id=&#34;first-attempt&#34;&gt;First attempt&lt;/h1&gt;
-&lt;p&gt;Compiling and loading a BPF program is multiple step process that roughly goes:&lt;/p&gt;
-&lt;ol&gt;
-&lt;li&gt;Write an eBPF program in C.&lt;/li&gt;
-&lt;li&gt;Compile said program using clang into an eBPF machine code ELF object file.&lt;/li&gt;
-&lt;li&gt;For any shared resources in the program, such as maps, first create the map using the appropriate system call and then do the &amp;lsquo;relocation&amp;rsquo; of the resource in the object file.&lt;/li&gt;
-&lt;li&gt;Ask the kernel to load your object file and attach it to some eBPF interface.&lt;/li&gt;
-&lt;/ol&gt;
-&lt;p&gt;For example an eBPF program like:&lt;/p&gt;
-&lt;pre&gt;&lt;code&gt;#include &amp;lt;linux/bpf.h&amp;gt;
-#include &amp;lt;linux/types.h&amp;gt;
-
-#include &amp;lt;bpf/bpf_helpers.h&amp;gt;
-
-#define SEC(NAME) __attribute__((section(NAME), used))
-
-struct bpf_map_def SEC(&amp;quot;maps&amp;quot;) sock_map =
-  {
-   .type = BPF_MAP_TYPE_SOCKMAP,
-   .key_size = sizeof(int),
-   .value_size = sizeof(int),
-   .max_entries = 2,
-  };
-
-struct bpf_map_def SEC(&amp;quot;maps&amp;quot;) ip_map =
-  {
-   .type = BPF_MAP_TYPE_HASH,
-   .key_size = sizeof(__u64),
-   .value_size = sizeof(int),
-   .max_entries = 64,
-  };
-
-SEC(&amp;quot;sk_skb/stream_parser&amp;quot;)
-int turn_parser(struct __sk_buff *skb)
-{
-	return skb-&amp;gt;len;
-}
-
-SEC(&amp;quot;sk_skb/stream_verdict&amp;quot;)
-int turn_verdict(struct __sk_buff *skb) {
-  __u64 ip = skb-&amp;gt;remote_ip4;
-  __u32 port = skb-&amp;gt;remote_port;
-  __u64 key = (ip &amp;lt;&amp;lt; 32) | port;
-
-  int *idx = bpf_map_lookup_elem(&amp;amp;ip_map, &amp;amp;key);
-  if (!idx) {
-    return SK_DROP;
-  }
-
-  return bpf_sk_redirect_map(skb, &amp;amp;sock_map, *idx, 0);
-}
-&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;has two maps in that both need to be created by the &amp;lsquo;user space&amp;rsquo; loader application and then the maps file descriptors &amp;lsquo;mapped&amp;rsquo; into the appropriate locations in the eBPF object file using a magical eBPF instruction. The kernel with then resolve the file descriptor to an actual memory address when the eBPF program is loaded.&lt;/p&gt;
-&lt;p&gt;If this seems a bit complicated at first glance it&#39;s because it is a bit complicated! So being a fairly lazy person I decided to see what tool is out there that can do the above for me without resorting to writing my own loader and I quickly discovered &lt;a href=&#34;https://github.com/iovisor/bcc&#34;&gt;BCC - the BPF Compiler Collection&lt;/a&gt;.&lt;/p&gt;
-&lt;p&gt;BCC is a really neat project that allows you to compile your BPF programs and patch them with the relocations all from your favourite programming language - as long as that programming language is either C or Python. So pretty much everyone is covered I no?&lt;/p&gt;
-&lt;p&gt;It&#39;s also some pretty cool technology. Essentially, from what I can tell, it&#39;s a clang frontend that consumes your C code and automatically does the relocations for you as part of the compilation process. Given the allure of automatically generating BPF programs including all the relocation BCC seemed like ideal - until I started using it and discovered that sockmap and it&#39;s associated calls are NOT supported by the clang frontend.&lt;/p&gt;
-&lt;p&gt;No matter. Not afraid to roll up my sleaves, grease my elbows and patch this beautiful beast of a tool to mine own purposes I dove head first into the rabbit hole. And boy is it a magnificent rabbit hole but it&#39;s also a really deep, mostly undocumented C++ and clang API rabbit hole. And I was here to learn about eBPF really so I decided to look around for an alternate solution. (Also I wanted to finish this blog post).&lt;/p&gt;
-&lt;p&gt;First attempt yielded some partial patches (promise, will try to wrap these up) to the BCC toolchain to support sockmap, some additional APIs and a deep respect for the current BCC team.&lt;/p&gt;
-&lt;h1 id=&#34;second-attempt&#34;&gt;Second attempt&lt;/h1&gt;
-&lt;p&gt;The second attempt was more straight forward. As part of digging into BCC I discovered a library called &lt;a href=&#34;https://github.com/libbpf/libbpf&#34;&gt;libbpf&lt;/a&gt;, which is a standalone build of the linux kernel trees bpf library. A quick review of the header files seemed to show that this tool could certainly help with most of nitty-gritty ELF parsing, eBPF specifics and even provide convenient wrappers around BPF system call.&lt;/p&gt;
-&lt;p&gt;Seemed almost too good to be true. Given the above eBPF program how do I actually compile and load it? For the compiling piece I&#39;d have to resort a crude command line:&lt;/p&gt;
-&lt;p&gt;&lt;code&gt;clang -Wall -Wextra -O2 -emit-llvm -c ebpf-kern.c -S -o - | llc -march=bpf -filetype=obj -o ebpf-kern.o&lt;/code&gt;&lt;/p&gt;
-&lt;p&gt;Long gone is the magic of the BCC and I would of course have to do my own&amp;hellip; dun-dun-duh RELOCATIONS! But before we jump into that I&#39;d like to present the master piece below - them main entry point. As is fashionalble these days there are no comments. The whole file, &lt;a href=&#34;https://github.com/dbolcsfoldi/ebpf-spice-cookie/blob/master/main.cc&#34;&gt;main.cc&lt;/a&gt; is on github.&lt;/p&gt;
-&lt;pre&gt;&lt;code&gt;#include &amp;lt;poll.h&amp;gt;
-#include &amp;lt;stdint.h&amp;gt;
-
-#include &amp;lt;bpf/libbpf.h&amp;gt;
-&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;I built libbpf from source (on Ubuntu Eoan) for this - I figured it&#39;d be easier to have a version that I could &amp;lsquo;mess with&amp;rsquo; if needed.&lt;/p&gt;
-&lt;pre&gt;&lt;code&gt;#include &amp;quot;server.h&amp;quot;
-#include &amp;quot;client.h&amp;quot;
-#include &amp;quot;bpf-loader.h&amp;quot;
-
-static int add_ip(struct bpf_map *ip_map, struct bpf_map *sock_map, const client &amp;amp;from, int idx, const client &amp;amp;to) {
-  uint64_t key = (static_cast&amp;lt;uint64_t&amp;gt;(htonl(from.ip())) &amp;lt;&amp;lt; 32) | htonl(from.port());
-
-  if (bpf_map_update_elem(bpf_map__fd(ip_map), &amp;amp;key, &amp;amp;idx, BPF_ANY) != 0) {
-    fprintf(stderr, &amp;quot;%d: %s\n&amp;quot;, errno, strerror(errno));
-    return -1;
-  }
-
-  int fd = to.fd();
-  if (bpf_map_update_elem(bpf_map__fd(sock_map), &amp;amp;idx, &amp;amp;fd, BPF_ANY) != 0) {
-    fprintf(stderr, &amp;quot;%d: %s\n&amp;quot;, errno, strerror(errno));
-    return -1;
-  }
-
-  return 0;
-}
-&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;As you may have noted in the eBPF program there are two maps used. The first one is the sockmap that contains all the client sockets, the second one is a hashmap that hashes the clients remote ip and remote port to the sockmap index it&#39;s stored at.&lt;/p&gt;
-&lt;p&gt;This allows the sockmap verdict program to route each &lt;strong&gt;sk_buff&lt;/strong&gt; to the correct socket my locating at the sk_buff remote ip and remote port. Of course this only supports IPv4. You might notice that the key is all using network byte order, this is because the sk_buff uses network byte order. It also stores the port as 32-bit value, hence the htonl.&lt;/p&gt;
-&lt;pre&gt;&lt;code&gt;int main(int argc, char *argv[]) {
-  bpf_loader b;
-&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;Most of the loading magic is contained within the bpf_loader class. It exposes a fairly clean interface but is actually a horrible hack underneath.&lt;/p&gt;
-&lt;pre&gt;&lt;code&gt;  auto r3 = b.load(argv[1]);
-
-  if (r3.is_err()) {
-    fprintf(stderr, &amp;quot;%d: %s\n&amp;quot;, r3.error().err(), r3.error().msg().c_str());
-    return -1;
-  }
-
-  auto r4 = b.map(&amp;quot;sock_map&amp;quot;);
-  if (r4.is_err()) {
-    fprintf(stderr, &amp;quot;%d: %s\n&amp;quot;, r4.error().err(), r4.error().msg().c_str());
-    return -1;
-  }
-
-  struct bpf_map *sock_map = r4.value();
-
-  r4 = b.map(&amp;quot;ip_map&amp;quot;);
-  if (r4.is_err()) {
-    fprintf(stderr, &amp;quot;%d: %s\n&amp;quot;, r4.error().err(), r4.error().msg().c_str());
-    return -1;
-  }
-
-  struct bpf_map *ip_map = r4.value();
-&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;At this point we&#39;ve loaded our eBPF object file and retrieved the two maps (&amp;ldquo;sock_map&amp;rdquo; and &amp;ldquo;ip_map&amp;rdquo;), so we know the eBPF program is good.&lt;/p&gt;
-&lt;pre&gt;&lt;code&gt;  server s(&amp;quot;localhost&amp;quot;, 8080);
-  auto r = s.init();
-
-  if (r.is_err()) {
-    fprintf(stderr, &amp;quot;%d: %s\n&amp;quot;, r.error().err(), r.error().msg().c_str());
-    return -1;
-  }
-
-  auto r2 = s.accept();
-  if (r2.is_err()) {
-    fprintf(stderr, &amp;quot;%d: %s\n&amp;quot;, r2.error().err(), r2.error().msg().c_str());
-    return -1;
-  }
-
-  client c1(r2.value().first, r2.value().second);
-  fprintf(stdout, &amp;quot;%s connected on %d (%d)\n&amp;quot;, c1.hostname().c_str(), c1.port(), c1.fd());
-
-  r2 = s.accept();
-  if (r2.is_err()) {
-    fprintf(stderr, &amp;quot;%d: %s\n&amp;quot;, r2.error().err(), r2.error().msg().c_str());
-    return -1;
-  }
-
-  client c2(r2.value().first, r2.value().second);
-  fprintf(stdout, &amp;quot;%s connected on %d (%d)\n&amp;quot;, c2.hostname().c_str(), c2.port(), c2.fd());
-
-&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;We&#39;ve created a listening socket, accepted two client connections, let&#39;s connect them~&lt;/p&gt;
-&lt;pre&gt;&lt;code&gt;
-  add_ip(ip_map, sock_map, c1, 0, c2);
-  add_ip(ip_map, sock_map, c2, 1, c1);
-
-&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;We call the add_ip function to set up the kernel side by adding the client sockets to the ip_map and sock_map. The program has already been loaded at this point though, we&#39;ve just been dropping all the incomming data.&lt;/p&gt;
-&lt;pre&gt;&lt;code&gt;  struct pollfd fds[2] =
-    {
-     { .fd = c1.fd(), .events = POLLRDHUP },
-     { .fd = c2.fd(), .events = POLLRDHUP },
-    };
-
-  poll(fds, sizeof(fds) / sizeof(fds[0]), -1);
-
-  fprintf(stdout, &amp;quot;we are done!\n&amp;quot;);
-  // wait for the magic!
-  return 0;
-}
-&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;Then we just wait for one of the clients close their connection which exits the program, cleaning up the BPF program and the BPF maps.&lt;/p&gt;
-&lt;h2 id=&#34;the-ebpf-loader&#34;&gt;The eBPF loader&lt;/h2&gt;
-&lt;p&gt;All the nitty gritty of loading and massaging the eBPF object file is contained within the &lt;a href=&#34;https://github.com/dbolcsfoldi/ebpf-spice-cookie/blob/master/bpf-loader.cc&#34;&gt;bpf_loader&lt;/a&gt;. The code is pretty straight forward except for the part that updates the maps in the eBPF file with the corresponding file descriptors.&lt;/p&gt;
-&lt;p&gt;libbpf provides an API where you can register a callback to modify the eBPF program before it&#39;s loaded into the kernel. To use it, we simply register our implementation, which program it should run for (the verify function) and how many instances of the program we should replacements for (just the one in this case).&lt;/p&gt;
-&lt;pre&gt;&lt;code&gt;bpf_program__set_prep(programs_[&amp;quot;sk_skb/stream_verdict&amp;quot;], 1, sock_map_inserter);
-&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;Simple eh? The actual callback implementation is a bit more complicated since we need to &amp;lsquo;patch up&amp;rsquo; the correct eBPF instructions with the file descriptors for the maps.&lt;/p&gt;
-&lt;pre&gt;&lt;code&gt;static int sock_map_inserter(struct bpf_program *prog, int n,
-                        struct bpf_insn *insns, int insns_cnt,
-                        struct bpf_prog_prep_result *res) {
-  struct bpf_insn *ni = static_cast&amp;lt;struct bpf_insn *&amp;gt;(calloc(sizeof(insns), insns_cnt));
-  memcpy(ni, insns, sizeof(insns) * insns_cnt);
-
-  for (int i = 0; i &amp;lt; insns_cnt; ++i) {
-    if (ni[i].code == (BPF_LD | BPF_IMM | BPF_DW)) {
-&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;What we are looking for here is a load instruction, specifically a load 64-bit load with IMM mode. Of course this is fragile, we make assumption here that we would only do this load in case of a map/resource call. But we don&#39;t know what this load is for at this point or how to handle it. The specifics on the magical load instructions are described in a comment in &lt;a href=&#34;https://github.com/libbpf/libbpf/blob/e5dbc1a96f138e7c47324a65269adff0ca0f4f6e/include/uapi/linux/bpf.h#L311&#34;&gt;linux/bpf.h&lt;/a&gt;.&lt;/p&gt;
-&lt;pre&gt;&lt;code&gt;/* When BPF ldimm64&#39;s insn[0].src_reg != 0 then this can have
- * two extensions:
- *
- * insn[0].src_reg:  BPF_PSEUDO_MAP_FD   BPF_PSEUDO_MAP_VALUE
- * insn[0].imm:      map fd              map fd
- * insn[1].imm:      0                   offset into value
- * insn[0].off:      0                   0
- * insn[1].off:      0                   0
- * ldimm64 rewrite:  address of map      address of map[0]+offset
- * verifier type:    CONST_PTR_TO_MAP    PTR_TO_MAP_VALUE
- */
-&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;If we were using BCC, the frontend would take care of this for us but&amp;hellip; see attempt no. 1.&lt;/p&gt;
-&lt;p&gt;Instead we get to loop through all the following instructions to find the call site and then figure out what call this load is for.&lt;/p&gt;
-&lt;pre&gt;&lt;code&gt;static struct bpf_insn * find_call(struct bpf_insn *ni, int count) {
-  for (int i = 0; i &amp;lt; count; ++i) {
-    if ((ni[i].code &amp;amp; 0xf0) == 0x80) {
-      return &amp;amp;ni[i];
-    }
-  }
-
-  return nullptr;
-}
-&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;Very simply, a call is a special eBPF jump encoding with a code for the function in the imm field. We simply loop through the remaining instructions to see if we can find one. And if not we&#39;ll crash :-)&lt;/p&gt;
-&lt;pre&gt;&lt;code&gt;    
-      struct bpf_insn *call_ni = find_call(&amp;amp;ni[i], insns_cnt - i);
-      int fd = 0;
-
-      if (call_ni-&amp;gt;imm == BPF_FUNC_map_lookup_elem) {
-        fd = fd_maps[&amp;quot;ip_map&amp;quot;];
-      } else if (call_ni-&amp;gt;imm == BPF_FUNC_sk_redirect_map) {
-        fd = fd_maps[&amp;quot;sock_map&amp;quot;];
-      } else {
-        continue;
-      }
-&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;Here we simply look for the two types of function calls we have maps for, either look something up in the hash map or redirect via the sockmap. The function call codes themselves are built using a macro in the &lt;a href=&#34;https://github.com/libbpf/libbpf/blob/e5dbc1a96f138e7c47324a65269adff0ca0f4f6e/include/uapi/linux/bpf.h#L3020&#34;&gt;linux/bpf.h&lt;/a&gt; header file.&lt;/p&gt;
-&lt;p&gt;For everything else, we simply skip it.&lt;/p&gt;
-&lt;pre&gt;&lt;code&gt;      ni[i].src_reg = BPF_PSEUDO_MAP_FD;
-      ni[i].imm = fd;
-    }
-  }
-  
-&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;Finally we do the actual patching, that is setting the src_reg to be BPF_PSEUDO_MAP_FD and the imm value to the correct map file descriptor, just as described in the comment.&lt;/p&gt;
-&lt;pre&gt;&lt;code&gt;
-  res-&amp;gt;new_insn_ptr = ni;
-  res-&amp;gt;new_insn_cnt = insns_cnt;
-  res-&amp;gt;pfd = nullptr;
-  return 0;
-}
-
-&lt;/code&gt;&lt;/pre&gt;&lt;p&gt;And finally we return the patched eBPF program to libbpf to be loaded by the kernel.&lt;/p&gt;
-&lt;h2 id=&#34;running-it&#34;&gt;Running it&lt;/h2&gt;
-&lt;p&gt;First clone the repo as &lt;code&gt;git clone https://github.com/dbolcsfoldi/ebpf-spice-cookie.git&lt;/code&gt; and build with &lt;code&gt;./build.sh&lt;/code&gt;.&lt;/p&gt;
-&lt;p&gt;To run it it&#39;s pretty straight forward, as root (or with CAP_NET_ADMIN set) do &lt;code&gt;./ebpf-user ebpf-kern.o&lt;/code&gt; and then connect to server using everyones favourite cat, the net cat.&lt;/p&gt;
-&lt;p&gt;&lt;code&gt;nc -4 127.0.0.1 8080&lt;/code&gt; and again &lt;code&gt;nc -4 127.0.0.1 8080&lt;/code&gt; and type away! Data traffic forwarded in the kernel using the magic of eBPF.&lt;/p&gt;
-&lt;p&gt;Done!&lt;/p&gt;
-</description>
-     </item>
-   
-     <item>
-       <title>On DNA sharing &amp; 23andme</title>
-       <link>https://blog.bolcsfoldi.com/posts/on-dna-sharing/</link>
-       <pubDate>Tue, 17 Dec 2019 10:52:47 -0800</pubDate>
-       
-       <guid>https://blog.bolcsfoldi.com/posts/on-dna-sharing/</guid>
-       <description>&lt;p&gt;A few months ago I decided the pay for DNA analysis at &lt;a href=&#34;https://23andme.com&#34;&gt;23andme.com&lt;/a&gt;. The decision to spit into a test tube and send it via priority mail might not seem to be that important, the implications (perceived or actual) of the decision are.&lt;/p&gt;
-&lt;p&gt;&lt;a href=&#34;https://23andme.com&#34;&gt;23andme.com&lt;/a&gt; and other such companies have a business model that&#39;s something like this:&lt;/p&gt;
-&lt;ol&gt;
-&lt;li&gt;Have randos share DNA with them.&lt;/li&gt;
-&lt;li&gt;Process rando&#39;s DNA and provide ancestry and other information derived from the DNA. Charge a fee for the processing.&lt;/li&gt;
-&lt;li&gt;Sell DNA information to pharma companies and other research endeavours to develop new medications and generally further the body of knowledge.&lt;/li&gt;
-&lt;li&gt;Profit!&lt;/li&gt;
-&lt;/ol&gt;
-&lt;p&gt;Of the above, step 3 is probably what gives most people pause. The concerns usually fall into two categories, making money from my DNA without getting a cut is unfair and sharing my DNA without my approval is violating my privacy.&lt;/p&gt;
-&lt;p&gt;Both of these concerns make sense on the surface but if you spend a little time reflecting on them they aren&#39;t really that convincing.&lt;/p&gt;
-&lt;h1 id=&#34;i-own-my-dna&#34;&gt;I own my DNA&lt;/h1&gt;
-&lt;p&gt;This may seem like a rational opinion but in reality it&#39;s actually an insane position to claim. Let me explain why I think so.&lt;/p&gt;
-&lt;p&gt;Your DNA is merely a collection of information needed by the cells in the body to make a human. Around half of the DNA that makes you You is shared by all cells, in all living creatures.&lt;/p&gt;
-&lt;p&gt;Making the claim for ownership of DNA surely must only apply for your DNA as whole since any individual part of it is so wildly ditributed you&#39;d be making a claim on all life in the other case.&lt;/p&gt;
-&lt;p&gt;Secondly, you did not create the DNA in your body or even exist in any legal sense when it was created. The act of conception created your DNA which preceeds the existence of you as an individual and legal person.&lt;/p&gt;
-&lt;p&gt;But let&#39;s assume that somehow you manage to have your parents transfer ownership of your DNA to you and that you only make the ownership claim for your DNA as whole, similar to how an author may own copyright to a book but not to the individual words within it. Or in this case individual chapters, excerpts and passages.&lt;/p&gt;
-&lt;p&gt;When you sequence your DNA and store it away it&#39;s actually not being processed, contained or reproduce in it&#39;s entirety but rather as &amp;lsquo;chopped up&amp;rsquo; segments. In truth, most of it is not sequenced so your DNA is not being analyzed or reproduced in it&#39;s entirety.&lt;/p&gt;
-&lt;p&gt;In my opinion this completely moots the point of ownership of the DNA since it would only ever apply to DNA as a whole. As soon as it&#39;s sequenced your claim would be tantamount making an ownership claim on all living cell DNA.&lt;/p&gt;
-&lt;p&gt;So what is left then? Well it leaves the knowledge of the distribution of these sequences within your DNA. In my view this is equivalent to making an ownership claim on your name and phone number. Technically something that belongs to you but you didn&#39;t create or really &amp;lsquo;discover&amp;rsquo;.&lt;/p&gt;
-&lt;h1 id=&#34;my-dna-will-be-used-against-me&#34;&gt;My DNA will be used against me&lt;/h1&gt;
-&lt;p&gt;This argument is bit different than the concept of ownership, that some nefarious third party will use my DNA either to frame me for a crime, construct some kind of targeted virus or in other ways be used against me.&lt;/p&gt;
-&lt;p&gt;This makes the assumption that:&lt;/p&gt;
-&lt;ol&gt;
-&lt;li&gt;
-&lt;p&gt;My DNA is hard to get hold of (it&#39;s not). I secreet and drop my DNA all over, skin flakes, blood samples, stool. Not really something I try to prevent.&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;My DNA is a conventient way to either frame me for a crime, kill me or otherwise provide some kind of leverage over me.&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ol&gt;
-&lt;p&gt;I&#39;d say if I have an enemy of the capacity to tailor a murder virus to just wipe me out the fact they have access to my DNA is the least of my problems. Of course, law enforcement have used DNA databases to solve crimes and they didn&#39;t need the criminals DNA to do it, relatives DNA is good enough!&lt;/p&gt;
-&lt;h1 id=&#34;in-short&#34;&gt;In short&lt;/h1&gt;
-&lt;p&gt;Your DNA belongs to life on this planet, nobody is out to get you via your DNA sequences. Please feel to share your DNA and maybe it might be used to further the body of human knowledge or help with the creation of some new medication. Or in the worst case, &lt;a href=&#34;https://23andme.com&#34;&gt;23andme.com&lt;/a&gt; takes your money and you get nothing of value in return.&lt;/p&gt;
-</description>
-     </item>
-   
- </channel>
+  <channel>
+    <title>Tags on Rants, opinions and tall tales.</title>
+    <link>https://blog.bolcsfoldi.com/tags/</link>
+    <description>Recent content in Tags on Rants, opinions and tall tales.</description>
+    <generator>Hugo -- gohugo.io</generator>
+    <language>en</language>
+    <copyright>Copyright &amp;copy; 2019 - David Bolcsfoldi</copyright>
+    <lastBuildDate>Mon, 10 Feb 2020 21:19:50 -0800</lastBuildDate>
+    
+	<atom:link href="https://blog.bolcsfoldi.com/tags/index.xml" rel="self" type="application/rss+xml" />
+    
+    
+    <item>
+      <title>ebpf</title>
+      <link>https://blog.bolcsfoldi.com/tags/ebpf/</link>
+      <pubDate>Mon, 10 Feb 2020 21:19:50 -0800</pubDate>
+      
+      <guid>https://blog.bolcsfoldi.com/tags/ebpf/</guid>
+      <description></description>
+    </item>
+    
+    <item>
+      <title>example</title>
+      <link>https://blog.bolcsfoldi.com/tags/example/</link>
+      <pubDate>Mon, 10 Feb 2020 21:19:50 -0800</pubDate>
+      
+      <guid>https://blog.bolcsfoldi.com/tags/example/</guid>
+      <description></description>
+    </item>
+    
+    <item>
+      <title>ip</title>
+      <link>https://blog.bolcsfoldi.com/tags/ip/</link>
+      <pubDate>Mon, 10 Feb 2020 21:19:50 -0800</pubDate>
+      
+      <guid>https://blog.bolcsfoldi.com/tags/ip/</guid>
+      <description></description>
+    </item>
+    
+    <item>
+      <title>linux</title>
+      <link>https://blog.bolcsfoldi.com/tags/linux/</link>
+      <pubDate>Mon, 10 Feb 2020 21:19:50 -0800</pubDate>
+      
+      <guid>https://blog.bolcsfoldi.com/tags/linux/</guid>
+      <description></description>
+    </item>
+    
+    <item>
+      <title>systems programming</title>
+      <link>https://blog.bolcsfoldi.com/tags/systems-programming/</link>
+      <pubDate>Mon, 10 Feb 2020 21:19:50 -0800</pubDate>
+      
+      <guid>https://blog.bolcsfoldi.com/tags/systems-programming/</guid>
+      <description></description>
+    </item>
+    
+    <item>
+      <title>argument</title>
+      <link>https://blog.bolcsfoldi.com/tags/argument/</link>
+      <pubDate>Tue, 17 Dec 2019 10:52:47 -0800</pubDate>
+      
+      <guid>https://blog.bolcsfoldi.com/tags/argument/</guid>
+      <description></description>
+    </item>
+    
+    <item>
+      <title>dna</title>
+      <link>https://blog.bolcsfoldi.com/tags/dna/</link>
+      <pubDate>Tue, 17 Dec 2019 10:52:47 -0800</pubDate>
+      
+      <guid>https://blog.bolcsfoldi.com/tags/dna/</guid>
+      <description></description>
+    </item>
+    
+    <item>
+      <title>opinion</title>
+      <link>https://blog.bolcsfoldi.com/tags/opinion/</link>
+      <pubDate>Tue, 17 Dec 2019 10:52:47 -0800</pubDate>
+      
+      <guid>https://blog.bolcsfoldi.com/tags/opinion/</guid>
+      <description></description>
+    </item>
+    
+    <item>
+      <title>science</title>
+      <link>https://blog.bolcsfoldi.com/tags/science/</link>
+      <pubDate>Tue, 17 Dec 2019 10:52:47 -0800</pubDate>
+      
+      <guid>https://blog.bolcsfoldi.com/tags/science/</guid>
+      <description></description>
+    </item>
+    
+    <item>
+      <title>society</title>
+      <link>https://blog.bolcsfoldi.com/tags/society/</link>
+      <pubDate>Tue, 17 Dec 2019 10:52:47 -0800</pubDate>
+      
+      <guid>https://blog.bolcsfoldi.com/tags/society/</guid>
+      <description></description>
+    </item>
+    
+  </channel>
 </rss>
