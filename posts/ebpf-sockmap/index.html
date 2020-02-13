@@ -120,7 +120,7 @@
 <li>For any shared resources in the program, such as maps, first create the map using the appropriate system call and then do the &lsquo;relocation&rsquo; of the resource in the object file.</li>
 <li>Ask the kernel to load your object file and attach it to some eBPF interface.</li>
 </ol>
-<p>For example an eBPF program like:</p>
+<p>An eBPF program as so</p>
 <pre><code>#include &lt;linux/bpf.h&gt;
 #include &lt;linux/types.h&gt;
 
@@ -163,17 +163,17 @@ int turn_verdict(struct __sk_buff *skb) {
 
   return bpf_sk_redirect_map(skb, &amp;sock_map, *idx, 0);
 }
-</code></pre><p>has two maps in that both need to be created by the &lsquo;user space&rsquo; loader application and then the maps file descriptors &lsquo;mapped&rsquo; into the appropriate locations in the eBPF object file using a magical eBPF instruction. The kernel with then resolve the file descriptor to an actual memory address when the eBPF program is loaded.</p>
+</code></pre><p>has two maps that both need to be created by the &lsquo;user space&rsquo; loader application and then the maps file descriptors &lsquo;mapped&rsquo; into the appropriate locations in the eBPF object file using a magical eBPF instruction. The kernel will then resolve the file descriptor to an actual memory address when the eBPF program is loaded.</p>
 <p>If this seems a bit complicated at first glance it's because it is a bit complicated! So being a fairly lazy person I decided to see what tool is out there that can do the above for me without resorting to writing my own loader and I quickly discovered <a href="https://github.com/iovisor/bcc">BCC - the BPF Compiler Collection</a>.</p>
 <p>BCC is a really neat project that allows you to compile your BPF programs and patch them with the relocations all from your favourite programming language - as long as that programming language is either C or Python. So pretty much everyone is covered I no?</p>
-<p>It's also some pretty cool technology. Essentially, from what I can tell, it's a clang frontend that consumes your C code and automatically does the relocations for you as part of the compilation process. Given the allure of automatically generating BPF programs including all the relocation BCC seemed like ideal - until I started using it and discovered that sockmap and it's associated calls are NOT supported by the clang frontend.</p>
-<p>No matter. Not afraid to roll up my sleaves, grease my elbows and patch this beautiful beast of a tool to mine own purposes I dove head first into the rabbit hole. And boy is it a magnificent rabbit hole but it's also a really deep, mostly undocumented C++ and clang API rabbit hole. And I was here to learn about eBPF really so I decided to look around for an alternate solution. (Also I wanted to finish this blog post).</p>
-<p>First attempt yielded some partial patches (promise, will try to wrap these up) to the BCC toolchain to support sockmap, some additional APIs and a deep respect for the current BCC team.</p>
+<p>It's also some pretty cool technology. Essentially, from what I can tell, it's a clang frontend that compiles your C code to an eBPF program and automatically does the relocations for you as part of the compilation process. Given the allure of automatically generating eBPF programs including all the relocations, BCC seemed like ideal - until I started using it and discovered that sockmap and it's associated calls are NOT supported by the clang frontend.</p>
+<p>No matter. Not afraid to roll up my sleaves, grease my elbows and patch this beautiful beast of a tool to mine own purposes I dove head first into the rabbit hole. And boy is it a magnificent rabbit hole. But it's also a really deep, mostly undocumented C++ and clang API rabbit hole and I was here to learn about eBPF. Instead I decided to look around for an alternate solution. (Also I wanted to finish this blog post).</p>
+<p>The first attempt yielded some partial patches (promise, will try to wrap these up) to the BCC toolchain to support sockmap, some additional APIs and a deep respect for the current BCC team.</p>
 <h1 id="second-attempt">Second attempt</h1>
-<p>The second attempt was more straight forward. As part of digging into BCC I discovered a library called <a href="https://github.com/libbpf/libbpf">libbpf</a>, which is a standalone build of the linux kernel trees bpf library. A quick review of the header files seemed to show that this tool could certainly help with most of nitty-gritty ELF parsing, eBPF specifics and even provide convenient wrappers around BPF system call.</p>
-<p>Seemed almost too good to be true. Given the above eBPF program how do I actually compile and load it? For the compiling piece I'd have to resort a crude command line:</p>
+<p>The second attempt was more straight forward. As part of digging into BCC I discovered a library called <a href="https://github.com/libbpf/libbpf">libbpf</a>, which is a standalone build of the linux kernel trees bpf library. A quick review of the header files seemed to show that this tool could certainly help with most of nitty-gritty ELF parsing, eBPF specifics and even provide convenient wrappers around the BPF system call.</p>
+<p>Seemed almost too good to be true. Given the above eBPF program, how do I actually compile and load it? For the compiling piece I'd have to resort a crude command line:</p>
 <p><code>clang -Wall -Wextra -O2 -emit-llvm -c ebpf-kern.c -S -o - | llc -march=bpf -filetype=obj -o ebpf-kern.o</code></p>
-<p>Long gone is the magic of the BCC and I would of course have to do my own&hellip; dun-dun-duh RELOCATIONS! But before we jump into that I'd like to present the master piece below - them main entry point. As is fashionalble these days there are no comments. The whole file, <a href="https://github.com/dbolcsfoldi/ebpf-spice-cookie/blob/master/main.cc">main.cc</a> is on github.</p>
+<p>Long gone is the magic of the BCC and I would of course have to do my own&hellip; dun-dun-duh RELOCATIONS! But before we jump into that I'd like to present the master piece below - them main entry point. As is fashionalble these days there are no comments. The complete <a href="https://github.com/dbolcsfoldi/ebpf-spice-cookie/blob/master/main.cc">main.cc</a> is on github.</p>
 <pre><code>#include &lt;poll.h&gt;
 #include &lt;stdint.h&gt;
 
@@ -200,7 +200,7 @@ static int add_ip(struct bpf_map *ip_map, struct bpf_map *sock_map, const client
   return 0;
 }
 </code></pre><p>As you may have noted in the eBPF program there are two maps used. The first one is the sockmap that contains all the client sockets, the second one is a hashmap that hashes the clients remote ip and remote port to the sockmap index it's stored at.</p>
-<p>This allows the sockmap verdict program to route each <strong>sk_buff</strong> to the correct socket my locating at the sk_buff remote ip and remote port. Of course this only supports IPv4. You might notice that the key is all using network byte order, this is because the sk_buff uses network byte order. It also stores the port as 32-bit value, hence the htonl.</p>
+<p>This allows the sockmap verdict program to route each <strong>sk_buff</strong> to the correct socket by constructing the hash key from the sk_buff remote ip and remote port and using that to get the correct sockmap index from the hash map. Of course this only supports IPv4. You might notice that the key is all using network byte order, this is because the sk_buff uses network byte order. It also stores the port as 32-bit value, hence the htonl.</p>
 <pre><code>int main(int argc, char *argv[]) {
   bpf_loader b;
 </code></pre><p>Most of the loading magic is contained within the bpf_loader class. It exposes a fairly clean interface but is actually a horrible hack underneath.</p>
@@ -253,12 +253,12 @@ static int add_ip(struct bpf_map *ip_map, struct bpf_map *sock_map, const client
   client c2(r2.value().first, r2.value().second);
   fprintf(stdout, &quot;%s connected on %d (%d)\n&quot;, c2.hostname().c_str(), c2.port(), c2.fd());
 
-</code></pre><p>We've created a listening socket, accepted two client connections, let's connect them~</p>
+</code></pre><p>We've created a listening socket, accepted two client connections, let's connect them!</p>
 <pre><code>
   add_ip(ip_map, sock_map, c1, 0, c2);
   add_ip(ip_map, sock_map, c2, 1, c1);
 
-</code></pre><p>We call the add_ip function to set up the kernel side by adding the client sockets to the ip_map and sock_map. The program has already been loaded at this point though, we've just been dropping all the incomming data.</p>
+</code></pre><p>We call the add_ip function to set up the kernel side by adding the client sockets to the ip_map and sock_map. The program has already been loaded at this point though, we've just been dropping all the incoming data.</p>
 <pre><code>  struct pollfd fds[2] =
     {
      { .fd = c1.fd(), .events = POLLRDHUP },
@@ -271,10 +271,10 @@ static int add_ip(struct bpf_map *ip_map, struct bpf_map *sock_map, const client
   // wait for the magic!
   return 0;
 }
-</code></pre><p>Then we just wait for one of the clients close their connection which exits the program, cleaning up the BPF program and the BPF maps.</p>
+</code></pre><p>Then we just wait for one of the clients close their connection which exits the program, cleaning up the eBPF program and the eBPF maps.</p>
 <h2 id="the-ebpf-loader">The eBPF loader</h2>
 <p>All the nitty gritty of loading and massaging the eBPF object file is contained within the <a href="https://github.com/dbolcsfoldi/ebpf-spice-cookie/blob/master/bpf-loader.cc">bpf_loader</a>. The code is pretty straight forward except for the part that updates the maps in the eBPF file with the corresponding file descriptors.</p>
-<p>libbpf provides an API where you can register a callback to modify the eBPF program before it's loaded into the kernel. To use it, we simply register our implementation, which program it should run for (the verify function) and how many instances of the program we should replacements for (just the one in this case).</p>
+<p>libbpf provides an API where you can register a callback to modify the eBPF program before it's loaded into the kernel. To use it, we simply register our callback function, which program it should run for (the verify function) and how many instances of the program we should replacements for (just the one in this case).</p>
 <pre><code>bpf_program__set_prep(programs_[&quot;sk_skb/stream_verdict&quot;], 1, sock_map_inserter);
 </code></pre><p>Simple eh? The actual callback implementation is a bit more complicated since we need to &lsquo;patch up&rsquo; the correct eBPF instructions with the file descriptors for the maps.</p>
 <pre><code>static int sock_map_inserter(struct bpf_program *prog, int n,
@@ -297,8 +297,7 @@ static int add_ip(struct bpf_map *ip_map, struct bpf_map *sock_map, const client
  * ldimm64 rewrite:  address of map      address of map[0]+offset
  * verifier type:    CONST_PTR_TO_MAP    PTR_TO_MAP_VALUE
  */
-</code></pre><p>If we were using BCC, the frontend would take care of this for us but&hellip; see attempt no. 1.</p>
-<p>Instead we get to loop through all the following instructions to find the call site and then figure out what call this load is for.</p>
+</code></pre><p>If we were using BCC, the frontend would take care of this for us but&hellip; see attempt no. 1. Instead we get to loop through all the following instructions to find the call site and then figure out what call this load instruction is for.</p>
 <pre><code>static struct bpf_insn * find_call(struct bpf_insn *ni, int count) {
   for (int i = 0; i &lt; count; ++i) {
     if ((ni[i].code &amp; 0xf0) == 0x80) {
@@ -320,14 +319,14 @@ static int add_ip(struct bpf_map *ip_map, struct bpf_map *sock_map, const client
       } else {
         continue;
       }
-</code></pre><p>Here we simply look for the two types of function calls we have maps for, either look something up in the hash map or redirect via the sockmap. The function call codes themselves are built using a macro in the <a href="https://github.com/libbpf/libbpf/blob/e5dbc1a96f138e7c47324a65269adff0ca0f4f6e/include/uapi/linux/bpf.h#L3020">linux/bpf.h</a> header file.</p>
-<p>For everything else, we simply skip it.</p>
+</code></pre><p>Here we look for the two types of function calls we have maps for, either look something up in the hash map (BPF_FUNC_map_lookup_elem) or redirect via the sockmap (BPF_FUNC_sk_redirect_map). The function call codes themselves are built using a macro in the <a href="https://github.com/libbpf/libbpf/blob/e5dbc1a96f138e7c47324a65269adff0ca0f4f6e/include/uapi/linux/bpf.h#L3020">linux/bpf.h</a> header file.</p>
+<p>For everything else, we skip it.</p>
 <pre><code>      ni[i].src_reg = BPF_PSEUDO_MAP_FD;
       ni[i].imm = fd;
     }
   }
   
-</code></pre><p>Finally we do the actual patching, that is setting the src_reg to be BPF_PSEUDO_MAP_FD and the imm value to the correct map file descriptor, just as described in the comment.</p>
+</code></pre><p>Then we do the actual patching, that is setting the src_reg to be BPF_PSEUDO_MAP_FD and the imm value to the correct map file descriptor, just as described in the comment.</p>
 <pre><code>
   res-&gt;new_insn_ptr = ni;
   res-&gt;new_insn_cnt = insns_cnt;
