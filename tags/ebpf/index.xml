@@ -7,10 +7,19 @@
     <generator>Hugo -- gohugo.io</generator>
     <language>en</language>
     <copyright>Copyright &amp;copy; 2019 - David Bolcsfoldi</copyright>
-    <lastBuildDate>Mon, 10 Feb 2020 21:19:50 -0800</lastBuildDate>
+    <lastBuildDate>Sun, 16 Feb 2020 12:19:03 -0800</lastBuildDate>
     
 	<atom:link href="https://blog.bolcsfoldi.com/tags/ebpf/index.xml" rel="self" type="application/rss+xml" />
     
+    
+    <item>
+      <title>eBPF BCC patches</title>
+      <link>https://blog.bolcsfoldi.com/posts/ebpf-update/</link>
+      <pubDate>Sun, 16 Feb 2020 12:19:03 -0800</pubDate>
+      
+      <guid>https://blog.bolcsfoldi.com/posts/ebpf-update/</guid>
+      <description>As I promised in the preceding post I was going to provide patches to BCC for sockmap support. Ta-da! Patches are here and I&#39;ve also added a BCC version of the example code.</description>
+    </item>
     
     <item>
       <title>eBPF and the sockmap API</title>

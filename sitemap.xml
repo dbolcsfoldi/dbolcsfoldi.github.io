@@ -4,46 +4,61 @@
   
   <url>
     <loc>https://blog.bolcsfoldi.com/posts/</loc>
-    <lastmod>2020-02-10T21:19:50-08:00</lastmod>
+    <lastmod>2020-02-16T12:19:03-08:00</lastmod>
+  </url>
+  
+  <url>
+    <loc>https://blog.bolcsfoldi.com/tags/bpf/</loc>
+    <lastmod>2020-02-16T12:19:03-08:00</lastmod>
   </url>
   
   <url>
     <loc>https://blog.bolcsfoldi.com/tags/ebpf/</loc>
-    <lastmod>2020-02-10T21:19:50-08:00</lastmod>
+    <lastmod>2020-02-16T12:19:03-08:00</lastmod>
   </url>
   
   <url>
-    <loc>https://blog.bolcsfoldi.com/posts/ebpf-sockmap/</loc>
-    <lastmod>2020-02-10T21:19:50-08:00</lastmod>
+    <loc>https://blog.bolcsfoldi.com/posts/ebpf-update/</loc>
+    <lastmod>2020-02-16T12:19:03-08:00</lastmod>
   </url>
   
   <url>
     <loc>https://blog.bolcsfoldi.com/tags/example/</loc>
-    <lastmod>2020-02-10T21:19:50-08:00</lastmod>
+    <lastmod>2020-02-16T12:19:03-08:00</lastmod>
   </url>
   
   <url>
     <loc>https://blog.bolcsfoldi.com/tags/ip/</loc>
-    <lastmod>2020-02-10T21:19:50-08:00</lastmod>
+    <lastmod>2020-02-16T12:19:03-08:00</lastmod>
   </url>
   
   <url>
     <loc>https://blog.bolcsfoldi.com/tags/linux/</loc>
-    <lastmod>2020-02-10T21:19:50-08:00</lastmod>
+    <lastmod>2020-02-16T12:19:03-08:00</lastmod>
   </url>
   
   <url>
     <loc>https://blog.bolcsfoldi.com/</loc>
-    <lastmod>2020-02-10T21:19:50-08:00</lastmod>
+    <lastmod>2020-02-16T12:19:03-08:00</lastmod>
+  </url>
+  
+  <url>
+    <loc>https://blog.bolcsfoldi.com/tags/sockmap/</loc>
+    <lastmod>2020-02-16T12:19:03-08:00</lastmod>
   </url>
   
   <url>
     <loc>https://blog.bolcsfoldi.com/tags/systems-programming/</loc>
-    <lastmod>2020-02-10T21:19:50-08:00</lastmod>
+    <lastmod>2020-02-16T12:19:03-08:00</lastmod>
   </url>
   
   <url>
     <loc>https://blog.bolcsfoldi.com/tags/</loc>
+    <lastmod>2020-02-16T12:19:03-08:00</lastmod>
+  </url>
+  
+  <url>
+    <loc>https://blog.bolcsfoldi.com/posts/ebpf-sockmap/</loc>
     <lastmod>2020-02-10T21:19:50-08:00</lastmod>
   </url>
   
